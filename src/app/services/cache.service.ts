@@ -5,9 +5,10 @@ let client: Redis | null = null;
 export function getClient(): Redis {
   if (!client) {
     client = new Redis({
-      host: process.env.REDIS_HOST || 'localhost',
-      port: Number(process.env.REDIS_PORT) || 6379,
-      password: process.env.REDIS_PASSWORD,
+      host: 'localhost',
+      port: 6379,
+      password: '',
+      username: 'default',
       retryStrategy: (times) => {
         // Exponential backoff with max 2000ms delay
         return Math.min(times * 50, 2000);

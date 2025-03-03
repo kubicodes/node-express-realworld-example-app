@@ -149,3 +149,73 @@ This project was intentionally developed with Cursor to evaluate how AI might ap
      - Minimal, functional design with a Singleton for the cache client and setter, getter methods using dependency injection for the client
      - Clear dependencies
      - Easy to test and modify
+
+## How to Run locally
+
+### Prerequisites
+
+Run the following command to install dependencies:
+
+```shell
+npm install
+```
+
+### Environment variables
+
+This project depends on some environment variables.
+If you are running this project locally, create a `.env` file at the root for these variables.
+Your host provider should included a feature to set them there directly to avoid exposing them.
+
+Here are the required ones:
+
+```
+DATABASE_URL=
+JWT_SECRET=
+NODE_ENV=production
+```
+
+### Run a local Redis instance
+You need to run a local redis instance on localhost - port 6379
+
+### Generate your Prisma client
+
+Run the following command to generate the Prisma Client which will include types based on your database schema:
+
+```shell
+npx prisma generate
+```
+
+### Apply any SQL migration script
+
+Run the following command to create/update your database based on existing sql migration scripts:
+
+```shell
+npx prisma migrate deploy
+```
+
+### Run the project
+
+Run the following command to run the project:
+
+```shell
+npx nx serve api
+```
+
+### Seed the database
+
+The project includes a seed script to populate the database:
+
+```shell
+npx prisma db seed
+```
+
+## How to Test locally
+A simple approach can be taken to test the solution.
+- Use the `GET /articles` route to retrieve all articles
+- Call the endpoint a second time and compare the response time between the first and second call. It should have decreased because of the cache hit.
+
+- Use the `POST /articles` endpoint to create an article
+- Call the `GET /articles` endpoint again - it should include the newly created article (testing cache invalidation)
+
+- Use the `PUT /articles/:slug` and the `DELETE /articles/:slug`endpoints to both create and delete an article
+- After each of them call the `GET /articles` endpoint again to see if the cache was invalidaed properly
