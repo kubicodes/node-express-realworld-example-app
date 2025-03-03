@@ -4,6 +4,9 @@ import HttpException from '../../models/http-exception.model';
 import profileMapper from '../profile/profile.utils';
 import articleMapper from './article.mapper';
 import { Tag } from '../tag/tag.model';
+import * as cache from '../../services/cache.service';
+
+const redis = cache.getClient();
 
 const buildFindAllQuery = (query: any, id: number | undefined) => {
   const queries: any = [];
@@ -168,7 +171,9 @@ export const createArticle = async (article: any, id: number) => {
   }
 
   if (!description) {
-    throw new HttpException(422, { errors: { description: ["can't be blank"] } });
+    throw new HttpException(422, {
+      errors: { description: ["can't be blank"] },
+    });
   }
 
   if (!body) {
@@ -235,10 +240,20 @@ export const createArticle = async (article: any, id: number) => {
     },
   });
 
-  return articleMapper(createdArticle, id);
+  const cacheKey = `article:${slug}`;
+  const mappedArticle = articleMapper(createdArticle, id);
+  await cache.set(redis, cacheKey, mappedArticle);
+
+  return mappedArticle;
 };
 
 export const getArticle = async (slug: string, id?: number) => {
+  const cacheKey = `article:${slug}`;
+  const cachedArticle = await cache.get(redis, cacheKey);
+  if (cachedArticle) {
+    return cachedArticle;
+  }
+
   const article = await prisma.article.findUnique({
     where: {
       slug,
@@ -270,7 +285,9 @@ export const getArticle = async (slug: string, id?: number) => {
     throw new HttpException(404, { errors: { article: ['not found'] } });
   }
 
-  return articleMapper(article, id);
+  const mappedArticle = articleMapper(article, id);
+  await cache.set(redis, cacheKey, mappedArticle);
+  return mappedArticle;
 };
 
 const disconnectArticlesTags = async (slug: string) => {
@@ -288,8 +305,15 @@ const disconnectArticlesTags = async (slug: string) => {
 
 export const updateArticle = async (article: any, slug: string, id: number) => {
   let newSlug = null;
+  let existingArticle = null;
 
-  const existingArticle = await await prisma.article.findFirst({
+  const cacheKey = `article:${slug}`;
+  const cachedArticle = await cache.get(redis, cacheKey);
+  if (cachedArticle) {
+    existingArticle = cachedArticle;
+  }
+
+  existingArticle = await await prisma.article.findFirst({
     where: {
       slug,
     },
@@ -315,18 +339,25 @@ export const updateArticle = async (article: any, slug: string, id: number) => {
 
   if (article.title) {
     newSlug = `${slugify(article.title)}-${id}`;
+    let existingArticle = null;
 
     if (newSlug !== slug) {
-      const existingTitle = await prisma.article.findFirst({
-        where: {
-          slug: newSlug,
-        },
-        select: {
-          slug: true,
-        },
-      });
+      const cacheKey = `article:${slug}`;
+      const cachedArticle = await cache.get(redis, cacheKey);
+      if (cachedArticle) {
+        existingArticle = cachedArticle;
+      } else {
+        existingArticle = await prisma.article.findFirst({
+          where: {
+            slug: newSlug,
+          },
+          select: {
+            slug: true,
+          },
+        });
+      }
 
-      if (existingTitle) {
+      if (existingArticle) {
         throw new HttpException(422, { errors: { title: ['must be unique'] } });
       }
     }
@@ -379,7 +410,15 @@ export const updateArticle = async (article: any, slug: string, id: number) => {
     },
   });
 
-  return articleMapper(updatedArticle, id);
+  // Invalidate old slug cache
+  await cache.del(redis, cacheKey);
+
+  // Set cache for new article (with potentially new slug)
+  const mappedArticle = articleMapper(updatedArticle, id);
+  const newCacheKey = `article:${newSlug || slug}`;
+  await cache.set(redis, newCacheKey, mappedArticle);
+
+  return mappedArticle;
 };
 
 export const deleteArticle = async (slug: string, id: number) => {
@@ -411,6 +450,9 @@ export const deleteArticle = async (slug: string, id: number) => {
       slug,
     },
   });
+
+  // Invalidate cache after delete
+  await cache.del(redis, `article:${slug}`);
 };
 
 export const getCommentsByArticle = async (slug: string, id?: number) => {
@@ -463,7 +505,9 @@ export const getCommentsByArticle = async (slug: string, id?: number) => {
       username: comment.author.username,
       bio: comment.author.bio,
       image: comment.author.image,
-      following: comment.author.followedBy.some((follow: any) => follow.id === id),
+      following: comment.author.followedBy.some(
+        (follow: any) => follow.id === id
+      ),
     },
   }));
 
@@ -510,6 +554,9 @@ export const addComment = async (body: string, slug: string, id: number) => {
     },
   });
 
+  // Invalidate article cache since comment count changed
+  await cache.del(redis, `article:${slug}`);
+
   return {
     id: comment.id,
     createdAt: comment.createdAt,
@@ -519,7 +566,9 @@ export const addComment = async (body: string, slug: string, id: number) => {
       username: comment.author.username,
       bio: comment.author.bio,
       image: comment.author.image,
-      following: comment.author.followedBy.some((follow: any) => follow.id === id),
+      following: comment.author.followedBy.some(
+        (follow: any) => follow.id === id
+      ),
     },
   };
 };
@@ -537,6 +586,11 @@ export const deleteComment = async (id: number, userId: number) => {
         select: {
           id: true,
           username: true,
+        },
+      },
+      article: {
+        select: {
+          slug: true,
         },
       },
     },
@@ -557,6 +611,11 @@ export const deleteComment = async (id: number, userId: number) => {
       id,
     },
   });
+
+  // Invalidate article cache since comment count changed
+  if (comment.article?.slug) {
+    await cache.del(redis, `article:${comment.article.slug}`);
+  }
 };
 
 export const favoriteArticle = async (slugPayload: string, id: number) => {
@@ -598,9 +657,15 @@ export const favoriteArticle = async (slugPayload: string, id: number) => {
     ...article,
     author: profileMapper(article.author, id),
     tagList: article?.tagList.map((tag: Tag) => tag.name),
-    favorited: article.favoritedBy.some((favorited: any) => favorited.id === id),
+    favorited: article.favoritedBy.some(
+      (favorited: any) => favorited.id === id
+    ),
     favoritesCount: _count?.favoritedBy,
   };
+
+  // Update cache with new favorite status
+  const cacheKey = `article:${slugPayload}`;
+  await cache.set(redis, cacheKey, result);
 
   return result;
 };
@@ -640,13 +705,19 @@ export const unfavoriteArticle = async (slugPayload: string, id: number) => {
     },
   });
 
-  const result = {
+  const mappedArticle = {
     ...article,
     author: profileMapper(article.author, id),
     tagList: article?.tagList.map((tag: Tag) => tag.name),
-    favorited: article.favoritedBy.some((favorited: any) => favorited.id === id),
+    favorited: article.favoritedBy.some(
+      (favorited: any) => favorited.id === id
+    ),
     favoritesCount: _count?.favoritedBy,
   };
 
-  return result;
+  // Update cache with new favorite status
+  const cacheKey = `article:${slugPayload}`;
+  await cache.set(redis, cacheKey, mappedArticle);
+
+  return mappedArticle;
 };
